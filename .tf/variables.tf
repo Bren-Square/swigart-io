@@ -1,11 +1,11 @@
 locals {
-  app_name = "swigart.io"
+  app_name = "swigart-io"
 
   tags = {
     Name        = local.tier
     Owner       = "bts"
     Department  = "eds"
-    GitRepo     = "swigart.io"
+    GitRepo     = "swigart-io"
     ProjectName = local.app_name
     Tier        = local.tier
   }
@@ -14,7 +14,7 @@ locals {
     Name        = local.tier
     Owner       = "bts"
     Department  = "eds"
-    GitRepo     = "swigart.io"
+    GitRepo     = "swigart-io"
     ProjectName = local.app_name
     Tier        = local.tier
     Status      = "public"
@@ -24,7 +24,7 @@ locals {
     Name        = local.tier
     Owner       = "bts"
     Department  = "eds"
-    GitRepo     = "swigart.io"
+    GitRepo     = "swigart-io"
     ProjectName = local.app_name
     Tier        = local.tier
     Status      = "private"
