@@ -1,0 +1,34 @@
+# Baseline workflow for fastapi based projects
+
+name: Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  EDS_APP: 'swigart.io'
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_ACCOUNT: ${{ secrets.AWS_ACCOUNT }}
+  ENVIRONMENT: "prod"
+  
+jobs:
+   build:
+     name: build
+     runs-on: ubuntu-latest
+     steps:
+       - name: Checkout
+         uses: actions/checkout@v2
+       - name: Host Setup
+         run: bash ./.github/scripts/1_setup.sh
+       - name: Provision Infrastructure
+         run: bash ./.github/scripts/2_provision.sh
+       - name: docker-build
+         run: bash ./.github/scripts/3_build.sh
+       - name: deploy
+         run: bash ./.github/scripts/4_deploy.sh
+         
+     

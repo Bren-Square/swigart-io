@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+
+# return fail if part of pipe fails
+set -o pipefail
+set -e
+
+SCRIPT_NAME=$(basename "$0")
+NC='\033[0m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DATE_FORMAT="%Y-%m-%d %T"
+VERBOSE=0
+DISABLE_COLOUR=0
+
+echo_normal() {
+  echo -e "$(date +"${DATE_FORMAT}")"" $1"
+}
+
+echo_green() {
+  if [[ $VERBOSE -gt 0 ]]; then
+    if [[ $DISABLE_COLOUR -gt 0 ]]; then
+      echo_normal "$1"
+    else
+      echo -e "$(date +"${DATE_FORMAT}")"" ${GREEN}$1 ${NC}"
+    fi
+  fi
+}
+
+echo_cyan() {
+  if [[ $VERBOSE -gt 1 ]]; then
+    if [[ $DISABLE_COLOUR -gt 0 ]]; then
+      echo_normal "$1"
+    else
+      echo -e "$(date +"${DATE_FORMAT}")"" ${CYAN}$1 ${NC}"
+    fi
+  fi
+}
+
+echo_red() {
+  if [[ $DISABLE_COLOUR -gt 0 ]]; then
+    echo_normal "$1"
+  else
+    echo -e "$(date +"${DATE_FORMAT}")"" ${RED}$1 ${NC}"
+  fi
+}
+
+handle_cmd_stat() {
+  if [ "$1" -eq 0 ]; then
+    echo_green "$2 succeeded"
+  else
+    echo_red "$2 failed with exit code: $1"
+    if [[ -n $3 ]] && [[ $3 -gt 0 ]]; then
+      exit "$3"
+    fi
+  fi
+}
+
+create_tmp_file() {
+  tmpfile=$(mktemp /tmp/"$SCRIPT_NAME".XXXXXX)
+  CMD_RES=$?
+  handle_cmd_stat $CMD_RES "creating tmp file" 255
+}
+
+delete_tmp_file() {
+  rm "$tmpfile"
+  CMD_RES=$?
+  handle_cmd_stat $CMD_RES "deleting tmp file" 254
+}
+
+# script usage
+usage() {
+  cat << EOF
+  usage: $0 [OPTIONS]
+
+  Runs 'terraform init' and sets the backend config with the proper AWS profile, S3 bucket, and key.
+  Profile, S3 bucket, and key can be stored in a config file.
+
+  OPTIONS:
+    -c      config file to source in, optional, defaults to .tf-init.conf
+    -p      Terraform backend config profile, defaults to terraform
+    -b      Terraform backend config S3 bucket, defaults to bts-terraform-state
+    -k      Terraform backend config key, defaults to current directory name.
+            The extention .tfstate will be added if not present.  Valid options are
+            deploy and provision only, unless -f flag is used to override
+    -f      Force flag to ignore key validation
+    -n      Skip the key altogether, will not set the key when calling init
+    -w      Flag to also create the 3 tier workspaces, dev, stg, prd
+    -d      Init a development based config meant for use with sandbox environment
+    -2      Use terraform_v12
+    -v      verbose
+
+EOF
+}
+
+confirm_aws_profile() {
+  echo_cyan "Confirming AWS profile '$1' exists"
+  if ! (aws configure list --profile "$1" > /dev/null 2>&1); then
+    echo "AWS profile '$1' is not set. You will need to configure it.";
+    aws configure --profile "$1"
+  fi
+}
+
+# Set environment variables for fetching module
+set_aws() {
+  if [[ -z "$AWS_ACCESS_KEY_ID" ]]; then
+    AWS_ACCESS_KEY_ID="$(aws --profile "$1" configure get aws_access_key_id)"
+    export AWS_ACCESS_KEY_ID
+  fi
+
+  if [[ -z "$AWS_SECRET_ACCESS_KEY" ]]; then
+    AWS_SECRET_ACCESS_KEY=$(aws --profile "$1" configure get aws_secret_access_key)
+    export AWS_SECRET_ACCESS_KEY
+  fi
+}
+
+
+set_env() {
+  if [[ -f "$CONF_FILE" ]]; then
+    echo_cyan "Sourcing in config $CONF_FILE"
+    source "$CONF_FILE"
+  fi
+
+  if [[ -n "$OPT_TF_PROFILE" ]]; then
+    TF_PROFILE="$OPT_TF_PROFILE"
+  fi
+  
+  if [[ -z "$TF_PROFILE" ]]; then
+    echo_green "setting TF_PROFILE to default 'default'"
+    TF_PROFILE="default"
+  fi
+
+  confirm_aws_profile "$TF_PROFILE"
+  set_aws "$TF_PROFILE"
+
+  if [[ -n "$OPT_TF_BUCKET" ]]; then
+    TF_BUCKET="$OPT_TF_BUCKET"
+  fi
+
+  if [[ -z "$TF_BUCKET" ]]; then
+    echo_green "setting TF_BUCKET to default 'bts-terraform-state'"
+    TF_BUCKET="bts-terraform-state"
+  fi
+
+  if [[ $TF_NO_KEY -gt 0 ]]; then
+    echo_green "Ignoring key"
+    return
+  fi
+
+  if [[ -n "$OPT_TF_KEY" ]]; then
+    TF_KEY="$OPT_TF_KEY"
+  fi
+  
+  if [[ -z "$TF_KEY" ]]; then
+    TF_KEY="${PWD##*/}"
+  fi
+  
+  if [[ $TF_FORCE -gt 0 ]]; then
+    echo_green "Ignoring key validation for key: $TF_KEY"
+  else
+    case $TF_KEY in
+      deploy.tfstate)
+        ;;
+      provision.tfstate)
+        ;;
+      deploy|provision)
+        echo_cyan "Adding .tfstate suffix to key"
+        TF_KEY="$TF_KEY.tfstate"
+        ;;
+      *)
+        echo_red "TF_KEY:'$TF_KEY' not valid, must be deploy.tfstate or provision.tfstate"
+        exit 1
+        ;;
+    esac
+  fi
+  echo_cyan "TF_PROFILE=$TF_PROFILE"
+  echo_cyan "TF_KEY=$TF_KEY"
+}
+
+tf_init() {
+  echo_cyan "profile:$1"
+  echo_cyan "bucket:$2"
+  echo_cyan "key:$3"
+  if [[ $TF_NO_KEY == 0 ]]; then
+    $TERRAFORM init \
+      -backend-config="profile=$1" \
+      -backend-config="bucket=$2" \
+      -backend-config="key=$3"
+  else
+    $TERRAFORM init \
+      -backend-config="profile=$1" \
+      -backend-config="bucket=$2"
+  fi
+}
+
+tf_workspace_init() {
+  echo_cyan "workspace:$1"
+  if ! ($TERRAFORM workspace select "$1" > /dev/null 2>&1); then
+    echo_green "Workspace $1 does not exist and will now be created..."
+    $TERRAFORM workspace new "$1"
+    handle_cmd_stat $? "Creating $1 workspace" 2
+  fi
+}
+
+check_v12() {
+  if [[ ! -f $TERRAFORM ]]; then
+    echo_red "$TERRAFORM not found"
+    exit 1
+  fi
+}
+
+CONF_FILE=".tf-init.conf"
+OPT_TF_PROFILE=
+OPT_TF_KEY=
+OPT_TF_BUCKET=
+TF_WORKSPACE_INIT=0
+TF_FORCE=0
+TF_NO_KEY=0
+DEV_MODE=0
+TERRAFORM="$(which terraform)"
+while getopts "c:p:b:k:wfnvd2" OPTION; do
+  case $OPTION in
+    c)
+      CONF_FILE="$OPTARG"
+      ;;
+    p)
+      OPT_TF_PROFILE="$OPTARG"
+      ;;
+    k)
+      OPT_TF_KEY="$OPTARG"
+      ;;
+    b)
+      OPT_TF_BUCKET="$OPTARG"
+      ;;
+    w)
+      TF_WORKSPACE_INIT=1
+      ;;
+    f)
+      TF_FORCE=1
+      ;;
+    n)
+      TF_NO_KEY=1
+      ;;
+    2)
+      TERRAFORM=~/bin/tf12
+      check_v12
+      ;;
+    v)
+      VERBOSE=$((VERBOSE+1))
+      ;;
+    d)
+      DEV_MODE=1
+      echo_green "Running dev setup"
+      if [[ -z "$OPT_TF_BUCKET" ]]; then
+        OPT_TF_BUCKET=bts-terraform-state-sandbox-testing
+      fi
+
+      echo_cyan "Downloading modules"
+      confirm_aws_profile default
+      set_aws default
+      $TERRAFORM get -update
+      unset AWS_ACCESS_KEY_ID
+      unset AWS_SECRET_ACCESS_KEY
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+set_env
+
+tf_init "$TF_PROFILE" "$TF_BUCKET" "$TF_KEY"
+
+if [[ $TF_WORKSPACE_INIT -gt 0 ]]; then
+  curr_ws=$($TERRAFORM workspace show)
+  if [[ $curr_ws == "default" ]]; then
+    curr_ws="dev"
+  fi
+
+  for w in prd stg dev; do
+    tf_workspace_init $w
+  done
+  $TERRAFORM workspace select $curr_ws
+fi
+
+if [[ $DEV_MODE -gt 0 ]]; then
+  tf_workspace_init sandbox
+fi
